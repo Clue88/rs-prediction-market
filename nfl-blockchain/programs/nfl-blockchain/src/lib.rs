@@ -233,6 +233,7 @@ pub struct CreateMarket<'info> {
         seeds = [b"market_auth", market.key().as_ref()],
         bump
     )]
+    /// CHECK: PDA authority, no data.
     pub market_authority: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
