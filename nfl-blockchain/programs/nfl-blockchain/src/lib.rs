@@ -1,8 +1,15 @@
+//! # NFL Blockchain
+//!
+//! This program implements a binary prediction market on Solana using the Anchor framework.
+//! It allows for the creation of markets, minting of YES/NO token pairs backed by collateral,
+//! resolution of markets to final outcomes, and redemption of winning tokens for collateral.
+
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount};
 
 declare_id!("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc");
 
+/// NFL Blockchain program.
 #[program]
 pub mod nfl_blockchain {
     use super::*;
