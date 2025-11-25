@@ -135,6 +135,122 @@ pub mod nfl_blockchain {
 
         Ok(())
     }
+
+    /// Resolve a market to a final outcome (Yes / No / Invalid).
+    ///
+    /// - Only `market.authority` may resolve.
+    /// - Must be called after `expiry_ts`.
+    /// - Sets `market.status = Resolved` and `market.outcome`.
+    pub fn resolve_market(ctx: Context<ResolveMarket>, outcome: Outcome) -> Result<()> {
+        let market = &mut ctx.accounts.market;
+
+        // Must not already be resolved
+        require!(
+            market.status != MarketStatus::Resolved,
+            NflError::MarketAlreadyResolved
+        );
+
+        // Must be past expiry
+        let now = Clock::get()?.unix_timestamp;
+        require!(now >= market.expiry_ts, NflError::MarketNotExpired);
+
+        // Only allow resolution to a non-pending outcome
+        require!(
+            matches!(outcome, Outcome::Yes | Outcome::No | Outcome::Invalid),
+            NflError::InvalidResolutionOutcome
+        );
+
+        market.status = MarketStatus::Resolved;
+        market.outcome = outcome;
+
+        msg!(
+            "Market {} resolved to {:?} at unix_ts={}",
+            market.key(),
+            outcome,
+            now
+        );
+
+        Ok(())
+    }
+
+    /// Redeem winning YES/NO tokens for collateral.
+    ///
+    /// - Market must be `Resolved`.
+    /// - If outcome = YES: burns user's YES and sends USDC from vault.
+    /// - If outcome = NO: burns user's NO and sends USDC from vault.
+    /// - Outcome = Invalid / Pending: not redeemable.
+    pub fn redeem(ctx: Context<Redeem>) -> Result<()> {
+        let market = &ctx.accounts.market;
+
+        // Market must be resolved
+        require!(
+            market.status == MarketStatus::Resolved,
+            NflError::MarketNotResolved
+        );
+
+        // Choose the winning mint and ATA based on outcome
+        let (winner_mint_ai, winner_ata_ai, winner_amount) = match market.outcome {
+            Outcome::Yes => (
+                ctx.accounts.yes_mint.to_account_info(),
+                ctx.accounts.user_yes_ata.to_account_info(),
+                ctx.accounts.user_yes_ata.amount,
+            ),
+            Outcome::No => (
+                ctx.accounts.no_mint.to_account_info(),
+                ctx.accounts.user_no_ata.to_account_info(),
+                ctx.accounts.user_no_ata.amount,
+            ),
+            Outcome::Pending | Outcome::Invalid => {
+                return err!(NflError::CannotRedeemForOutcome);
+            }
+        };
+
+        // Nothing to redeem
+        require!(winner_amount > 0, NflError::NothingToRedeem);
+
+        // Burn the winning tokens
+        {
+            let burn_accounts = token::Burn {
+                mint: winner_mint_ai.clone(),
+                from: winner_ata_ai.clone(),
+                authority: ctx.accounts.user.to_account_info(),
+            };
+            let cpi_ctx =
+                CpiContext::new(ctx.accounts.token_program.to_account_info(), burn_accounts);
+            token::burn(cpi_ctx, winner_amount)?;
+        }
+
+        // Transfer collateral from vault to user, signed by PDA
+        let market_key = market.key();
+        let signer_seeds: &[&[u8]] = &[
+            b"market_auth",
+            market_key.as_ref(),
+            &[market.market_authority_bump],
+        ];
+        let signer_seeds: &[&[&[u8]]] = &[signer_seeds];
+
+        let transfer_accounts = token::Transfer {
+            from: ctx.accounts.vault.to_account_info(),
+            to: ctx.accounts.user_collateral_ata.to_account_info(),
+            authority: ctx.accounts.market_authority.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            transfer_accounts,
+            signer_seeds,
+        );
+        token::transfer(cpi_ctx, winner_amount)?;
+
+        msg!(
+            "Redeemed {} units of {:?} for user {} in market {}",
+            winner_amount,
+            market.outcome,
+            ctx.accounts.user.key(),
+            market.key()
+        );
+
+        Ok(())
+    }
 }
 
 /// On-chain state for a single binary contract market.
@@ -310,6 +426,88 @@ pub struct MintPairs<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+/// Resolve a market to a final outcome.
+#[derive(Accounts)]
+pub struct ResolveMarket<'info> {
+    /// Must match `market.authority`.
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    /// The market being resolved.
+    #[account(
+        mut,
+        has_one = authority
+    )]
+    pub market: Account<'info, Market>,
+}
+
+/// Redeem winning YES/NO tokens for collateral.
+#[derive(Accounts)]
+pub struct Redeem<'info> {
+    /// User redeeming their winning tokens.
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    /// Market config; ties everything together.
+    #[account(
+        mut,
+        has_one = base_mint,
+        has_one = yes_mint,
+        has_one = no_mint,
+        has_one = vault
+    )]
+    pub market: Account<'info, Market>,
+
+    /// Collateral mint (e.g. USDC).
+    pub base_mint: Account<'info, Mint>,
+
+    /// YES mint.
+    #[account(mut)]
+    pub yes_mint: Account<'info, Mint>,
+
+    /// NO mint.
+    #[account(mut)]
+    pub no_mint: Account<'info, Mint>,
+
+    /// Market's collateral vault (holds base_mint).
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+
+    /// User's collateral account (will receive redeemed USDC).
+    #[account(
+        mut,
+        constraint = user_collateral_ata.owner == user.key(),
+        constraint = user_collateral_ata.mint == base_mint.key(),
+    )]
+    pub user_collateral_ata: Account<'info, TokenAccount>,
+
+    /// User's YES token account.
+    #[account(
+        mut,
+        constraint = user_yes_ata.owner == user.key(),
+        constraint = user_yes_ata.mint == yes_mint.key(),
+    )]
+    pub user_yes_ata: Account<'info, TokenAccount>,
+
+    /// User's NO token account.
+    #[account(
+        mut,
+        constraint = user_no_ata.owner == user.key(),
+        constraint = user_no_ata.mint == no_mint.key(),
+    )]
+    pub user_no_ata: Account<'info, TokenAccount>,
+
+    /// PDA that controls vault + mints.
+    #[account(
+        seeds = [b"market_auth", market.key().as_ref()],
+        bump = market.market_authority_bump
+    )]
+    /// CHECK: PDA authority, no data.
+    pub market_authority: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
 pub enum MarketStatus {
     /// Market open.
@@ -320,7 +518,7 @@ pub enum MarketStatus {
     Resolved,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// No resolution yet.
     Pending,
@@ -348,4 +546,16 @@ pub enum NflError {
     InvalidNoMint,
     #[msg("Vault account does not match market config.")]
     InvalidVault,
+    #[msg("Market has already been resolved.")]
+    MarketAlreadyResolved,
+    #[msg("Market has not yet reached expiry_ts.")]
+    MarketNotExpired,
+    #[msg("Market is not in a resolved state.")]
+    MarketNotResolved,
+    #[msg("Invalid outcome supplied for resolution.")]
+    InvalidResolutionOutcome,
+    #[msg("Cannot redeem in current market outcome.")]
+    CannotRedeemForOutcome,
+    #[msg("User has no winning tokens to redeem.")]
+    NothingToRedeem,
 }
