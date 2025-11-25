@@ -1,94 +1,26 @@
-use std::str::FromStr;
+use anchor_client::solana_sdk::signer::Signer;
 
-// `system_instruction` and `system_program` are deprecated but I can't get the new one to work
-#[allow(deprecated)]
-use anchor_client::{
-    solana_sdk::{
-        commitment_config::CommitmentConfig, pubkey::Pubkey, signature::read_keypair_file,
-        signature::Keypair, signer::Signer, system_instruction, system_program, sysvar::rent,
-    },
-    Client, Cluster,
-};
-use anchor_spl::token::{spl_token, Mint};
+use crate::test_utils::*;
 
 #[test]
 fn test_create_market() {
-    // Load payer from ANCHOR_WALLET
-    let anchor_wallet = std::env::var("ANCHOR_WALLET").unwrap();
-    let payer = read_keypair_file(&anchor_wallet).unwrap();
+    let (program, payer) = setup_client();
 
-    // Initialize nfl-blockchain program
-    let program_id = Pubkey::from_str("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc").unwrap();
-    let client = Client::new_with_options(Cluster::Localnet, &payer, CommitmentConfig::confirmed());
-    let program = client.program(program_id).unwrap();
+    let base_mint_kp = create_mint(&program, payer);
+    let base_mint = base_mint_kp.pubkey();
 
-    // Generate required accounts
-    let market = Keypair::new();
-    let base_mint = Keypair::new();
-    let yes_mint = Keypair::new();
-    let no_mint = Keypair::new();
-    let vault = Keypair::new();
+    let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, _market_authority) =
+        create_market(&program, payer, base_mint);
 
-    // Derive PDA (market authority)
-    let (market_authority, _bump) =
-        Pubkey::find_program_address(&[b"market_auth", market.pubkey().as_ref()], &program_id);
+    let market_account: nfl_blockchain::Market = program.account(market_kp.pubkey()).unwrap();
 
-    // Create and initialize base_mint
-    let mint_rent = program
-        .rpc()
-        .get_minimum_balance_for_rent_exemption(Mint::LEN)
-        .unwrap();
-
-    // Create the base_mint account
-    let create_mint_ix = system_instruction::create_account(
-        &payer.pubkey(),
-        &base_mint.pubkey(),
-        mint_rent,
-        Mint::LEN as u64,
-        &spl_token::id(),
-    );
-
-    program
-        .request()
-        .instruction(create_mint_ix)
-        .instruction(
-            spl_token::instruction::initialize_mint(
-                &spl_token::id(),
-                &base_mint.pubkey(),
-                &payer.pubkey(),
-                None,
-                6,
-            )
-            .unwrap(),
-        )
-        .signer(&base_mint)
-        .send()
-        .expect("failed to create + init base mint");
-
-    let system_program: Pubkey = Pubkey::new_from_array(system_program::id().to_bytes());
-
-    let expiry_ts = 1_700_000_000i64;
-    program
-        .request()
-        .accounts(nfl_blockchain::accounts::CreateMarket {
-            authority: payer.pubkey(),
-            market: market.pubkey(),
-            base_mint: base_mint.pubkey(),
-            yes_mint: yes_mint.pubkey(),
-            no_mint: no_mint.pubkey(),
-            vault: vault.pubkey(),
-            market_authority,
-            token_program: spl_token::id(),
-            system_program,
-            rent: rent::id(),
-        })
-        .args(nfl_blockchain::instruction::CreateMarket { expiry_ts })
-        .signer(&market)
-        .signer(&yes_mint)
-        .signer(&no_mint)
-        .signer(&vault)
-        .send()
-        .expect("");
+    assert_eq!(market_account.base_mint, base_mint);
+    assert_eq!(market_account.yes_mint, yes_mint_kp.pubkey());
+    assert_eq!(market_account.no_mint, no_mint_kp.pubkey());
+    assert_eq!(market_account.vault, vault_kp.pubkey());
+    assert_eq!(market_account.authority, payer.pubkey());
+    assert_eq!(market_account.status, nfl_blockchain::MarketStatus::Open);
+    assert_eq!(market_account.outcome, nfl_blockchain::Outcome::Pending);
 
     println!("create_market test passed!");
 }

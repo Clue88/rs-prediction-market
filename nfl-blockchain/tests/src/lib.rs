@@ -15,3 +15,6 @@ mod test_redeem_twice;
 
 #[cfg(test)]
 mod test_loser_cannot_redeem;
+
+// Utils
+pub mod test_utils;
