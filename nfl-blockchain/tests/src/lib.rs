@@ -9,3 +9,9 @@ mod test_resolve_market;
 
 #[cfg(test)]
 mod test_redeem;
+
+#[cfg(test)]
+mod test_redeem_twice;
+
+#[cfg(test)]
+mod test_loser_cannot_redeem;
