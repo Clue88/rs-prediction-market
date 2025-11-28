@@ -18,3 +18,6 @@ mod test_loser_cannot_redeem;
 
 // Utils
 pub mod test_utils;
+
+#[cfg(test)]
+mod test_order_book;
