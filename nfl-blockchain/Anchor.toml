@@ -1,4 +1,5 @@
 [toolchain]
+anchor_version = "0.30.1"
 package_manager = "yarn"
 
 [features]
@@ -6,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-nfl_blockchain = "433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc"
+nfl_blockchain = "G4prxukWTw5gm6oRxpuKcrghNBAcKr64vr634LgRkdu8"
 
 [registry]
 url = "https://api.apr.dev"

@@ -33,7 +33,7 @@ fn test_order_book() {
     let anchor_wallet = std::env::var("ANCHOR_WALLET").unwrap();
     let payer = read_keypair_file(&anchor_wallet).unwrap();
     let client = Client::new_with_options(Cluster::Localnet, &payer, CommitmentConfig::confirmed());
-    let program_id = Pubkey::from_str("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc").unwrap();
+    let program_id = Pubkey::from_str("G4prxukWTw5gm6oRxpuKcrghNBAcKr64vr634LgRkdu8").unwrap();
     let program = client.program(program_id).unwrap();
 
     let market = Keypair::new();

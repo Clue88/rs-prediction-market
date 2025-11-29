@@ -7,7 +7,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo};
 
-declare_id!("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc");
+declare_id!("G4prxukWTw5gm6oRxpuKcrghNBAcKr64vr634LgRkdu8");
 
 // --- Instruction Data Structs ---
 
@@ -169,6 +169,7 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
+    // --- ADDED: Buy Exact Function Implementation ---
     pub fn buy_exact<'info>(
         ctx: Context<'_, '_, '_, 'info, MarketBuyAccounts<'info>>, 
         params: BuyExactParams
@@ -178,6 +179,7 @@ pub mod nfl_blockchain {
         let ob = &mut ctx.accounts.order_book;
         let mut remaining_iter = ctx.remaining_accounts.iter();
 
+        // 1. Validation Logic
         let mut needed = quantity_to_buy;
         for order in ob.orders.iter() {
             if order.is_yes != want_yes { continue; }
@@ -187,6 +189,7 @@ pub mod nfl_blockchain {
         }
         if needed > 0 { return err!(NflError::InsufficientLiquidity); }
 
+        // 2. Execution Logic (Matched from Market Buy)
         let market_key = ctx.accounts.market.key();
         let seeds = &[
             b"market_auth",
@@ -203,6 +206,10 @@ pub mod nfl_blockchain {
 
             let fill_amount = order.quantity.min(quantity_to_buy);
             let seller_collateral_ata_info = remaining_iter.next().ok_or(NflError::MissingSellerAccounts)?;
+
+            if seller_collateral_ata_info.key() != order.seller_receive_collateral_ata {
+                return err!(NflError::SellerAccountMismatch);
+            }
 
             let cost = (order.price as u64).checked_mul(fill_amount).unwrap();
 
@@ -229,25 +236,17 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
-    /// Resolve a market to a final outcome (Yes / No / Invalid).
-    ///
-    /// - Only `market.authority` may resolve.
-    /// - Must be called after `expiry_ts`.
-    /// - Sets `market.status = Resolved` and `market.outcome`.
     pub fn resolve_market(ctx: Context<ResolveMarket>, outcome: Outcome) -> Result<()> {
         let market = &mut ctx.accounts.market;
 
-        // Must not already be resolved
         require!(
             market.status != MarketStatus::Resolved,
             NflError::MarketAlreadyResolved
         );
 
-        // Must be past expiry
         let now = Clock::get()?.unix_timestamp;
         require!(now >= market.expiry_ts, NflError::MarketNotExpired);
 
-        // Only allow resolution to a non-pending outcome
         require!(
             matches!(outcome, Outcome::Yes | Outcome::No | Outcome::Invalid),
             NflError::InvalidResolutionOutcome
@@ -266,22 +265,14 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
-    /// Redeem winning YES/NO tokens for collateral.
-    ///
-    /// - Market must be `Resolved`.
-    /// - If outcome = YES: burns user's YES and sends USDC from vault.
-    /// - If outcome = NO: burns user's NO and sends USDC from vault.
-    /// - Outcome = Invalid / Pending: not redeemable.
     pub fn redeem(ctx: Context<Redeem>) -> Result<()> {
         let market = &ctx.accounts.market;
 
-        // Market must be resolved
         require!(
             market.status == MarketStatus::Resolved,
             NflError::MarketNotResolved
         );
 
-        // Choose the winning mint and ATA based on outcome
         let (winner_mint_ai, winner_ata_ai, winner_amount) = match market.outcome {
             Outcome::Yes => (
                 ctx.accounts.yes_mint.to_account_info(),
@@ -298,10 +289,8 @@ pub mod nfl_blockchain {
             }
         };
 
-        // Nothing to redeem
         require!(winner_amount > 0, NflError::NothingToRedeem);
 
-        // Burn the winning tokens
         {
             let burn_accounts = token::Burn {
                 mint: winner_mint_ai.clone(),
@@ -313,7 +302,6 @@ pub mod nfl_blockchain {
             token::burn(cpi_ctx, winner_amount)?;
         }
 
-        // Transfer collateral from vault to user, signed by PDA
         let market_key = market.key();
         let signer_seeds: &[&[u8]] = &[
             b"market_auth",
@@ -412,12 +400,11 @@ pub struct PlaceLimitSell<'info> {
     #[account(mut)]
     pub seller_receive_collateral_ata: Account<'info, TokenAccount>,
     
-    // ADDED: We must pass the PDA to check ownership
+    // Check ownership against PDA
     #[account(seeds = [b"market_auth", market.key().as_ref()], bump = market.market_authority_bump)]
     /// CHECK: PDA used for constraints
     pub market_authority: UncheckedAccount<'info>,
 
-    // FIXED: Check against market_authority.key()
     #[account(mut, constraint = yes_vault.owner == market_authority.key())]
     pub yes_vault: Account<'info, TokenAccount>,
     #[account(mut, constraint = no_vault.owner == market_authority.key())]
