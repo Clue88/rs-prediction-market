@@ -22,10 +22,25 @@ Market {
 }
 ```
 
-Trading occurs independently of the smart contracts themselves. For example, if Alice wants to trade
-YES and Bob wants to trade NO, Alice could mint a YES/NO pair for 1 USDC and then sell the NO token
-to Bob at 0.60 USDC. Then, if the outcome is YES, Alice has a profit of 0.60 USDC. If the outcome is
-NO, Bob has a profit of 0.40 USDC.
+## Trading Mechanism and Settlement
+Trading is facilitated by an on-chain order book. While users can mint pairs 1:1, the order book 
+allows them to isolate their risk to a single outcome by selling the opposing token.
+
+Example Scenario: Alice wants to bet on YES. She initiates a trade by minting a YES/NO pair for 1 USDC. 
+She then places a limit order to sell the NO token for 0.60 USDC. This instruction holds her NO token 
+in escrow until a buyer is found.
+* The Trade: Bob believes the event will not happen (NO). He accepts Alice's price. 
+The system instantly transfers Bob's 0.60 USDC to Alice and releases the NO token to Bob.
+* The Positions:
+    * Alice now holds a YES token. She paid 1.00 originally but received 0.60 back. 
+    Her effective cost for the YES position is 0.40 USDC.
+    * Bob now holds a NO token. He paid 0.60 USDC for it.
+* Resolution: Once the event concludes, the market resolves to a final outcome, 
+unlocking the collateral vault for the winning side only:
+    * If YES wins: The YES token becomes redeemable for 1.00 USDC. 
+    Alice profits 0.60 (1.00 payout - 0.40 cost). Bob's NO token becomes worthless.
+    * If NO wins: The NO token becomes redeemable for 1.00 USDC. 
+    Bob profits 0.40 (1.00 payout - 0.60 cost). Alice's YES token becomes worthless.
 
 ## Installation
 Install Solana:
@@ -45,5 +60,6 @@ anchor test
 ```
 
 A number of tests to test various parts of the market lifecycle are included in `tests/src`. The
-tests cover the four instructions (`create_market`, `mint_pairs`, `resolve_market`, and `redeem`),
-as well as some invariants (e.g., can't redeem twice, losers can't redeem).
+tests cover the core market instructions (`create_market`, `mint_pairs`, `resolve_market`, and `redeem`), 
+the order book exchange mechanism (`initialize_order_book`, `place_limit_sell`, `market_buy`, and `buy_exact`), 
+and some invariants (e.g., can't redeem twice, losers can't redeem). 
