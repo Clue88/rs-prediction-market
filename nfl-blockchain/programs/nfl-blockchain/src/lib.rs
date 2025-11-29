@@ -247,8 +247,10 @@ pub mod nfl_blockchain {
     // NEW: ORDER BOOK FUNCTIONALITY
     // -------------------------------------------------------------------------
 
+    /// Initialize a new OrderBook account.
     pub fn initialize_order_book(ctx: Context<InitializeOrderBook>) -> Result<()> {
         let ob = &mut ctx.accounts.order_book;
+        // Link this order book to the specific market it serves
         ob.market = ctx.accounts.market.key();
         ob.next_order_id = 0;
         ob.capacity = 100;
@@ -256,15 +258,22 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
+    /// Place a Limit Sell Order.
+    /// This escrows the Seller's outcome tokens (YES or NO) into the vault 
+    /// and records their desire to sell at a specific price.
     pub fn place_limit_sell(ctx: Context<PlaceLimitSell>, price: u64, quantity: u64, is_yes: bool) -> Result<()> {
         require!(quantity > 0, NflError::InvalidAmount);
         
+        // Determine which tokens to escrow (YES tokens or NO tokens)
+        // and which vault they should go to.
         let (from_account, to_vault) = if is_yes {
             (&ctx.accounts.seller_token_ata, &ctx.accounts.yes_vault)
         } else {
             (&ctx.accounts.seller_token_ata, &ctx.accounts.no_vault)
         };
 
+        // 1. Escrow Transfer: Move tokens from Seller -> OrderBook Vault
+        // This ensures the tokens are available immediately when a buyer arrives.
         let cpi_accounts = Transfer {
             from: from_account.to_account_info(),
             to: to_vault.to_account_info(),
@@ -272,14 +281,18 @@ pub mod nfl_blockchain {
         };
         token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts), quantity)?;
 
+        // 2. Update State: Add the order to the on-chain vector
         let ob = &mut ctx.accounts.order_book;
         let order_id = ob.next_order_id;
         ob.next_order_id = order_id.checked_add(1).unwrap();
 
+        // Check capacity to prevent exceeding account size limits
         if ob.orders.len() as u64 >= ob.capacity {
             return err!(NflError::OrderBookFull);
         }
 
+        // Push the order struct. Note: We store the seller's collateral ATA 
+        // so we know where to send the USDC when this order is filled.
         ob.orders.push(Order {
             id: order_id,
             owner: ctx.accounts.seller.key(),
@@ -293,6 +306,8 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
+    /// Market Buy: Fills orders starting from the oldest/best price until quantity is met.
+    /// Uses 'remaining_accounts' to pay arbitrary sellers.
     pub fn market_buy<'info>(
         ctx: Context<'_, '_, '_, 'info, MarketBuyAccounts<'info>>, 
         params: MarketBuyParams
@@ -300,15 +315,17 @@ pub mod nfl_blockchain {
         let mut quantity_to_buy = params.quantity;
         let want_yes = params.want_yes;
 
-        // FIX: Extract AccountInfo FIRST (Immutable Borrow)
+        // RUST BORROW CHECKER WORKAROUND:
+        // We need 'order_book_info' (immutable) for the CPI signer later.
+        // But we also need 'ob' (mutable) to modify the orders vector.
+        // We must extract the immutable reference *before* taking the mutable borrow.
         let order_book_info = ctx.accounts.order_book.to_account_info();
-
-        // FIX: Then Borrow Mutably (Mutable Borrow)
         let ob = &mut ctx.accounts.order_book;
         
+        // Iterator for sellers passed in via 'remaining_accounts'
         let mut remaining_iter = ctx.remaining_accounts.iter();
 
-        // Prepare PDA signer
+        // Prepare PDA signer seeds (needed to unlock tokens from the Vault)
         let market_key = ctx.accounts.market.key();
         let bump = ctx.bumps.order_book;
         let seeds = &[
@@ -319,22 +336,30 @@ pub mod nfl_blockchain {
         let signer = &[&seeds[..]];
 
         let mut i = 0;
+        // Loop through orders until we satisfy the buy quantity or run out of orders
         while i < ob.orders.len() && quantity_to_buy > 0 {
             let order = &mut ob.orders[i];
 
+            // Skip orders that don't match the side we want (YES vs NO)
             if order.is_yes != want_yes { i += 1; continue; }
+            
+            // Cleanup: remove empty orders if encountered
             if order.quantity == 0 { ob.orders.swap_remove(i); continue; }
 
+            // Determine how much to fill from this specific order
             let fill_amount = order.quantity.min(quantity_to_buy);
+
+            // Fetch the specific Seller's account from remaining_accounts
             let seller_collateral_ata_info = remaining_iter.next().ok_or(NflError::MissingSellerAccounts)?;
 
+            // SECURITY CHECK: Ensure the account passed matches the order's owner
             if seller_collateral_ata_info.key() != order.seller_receive_collateral_ata {
                 return err!(NflError::SellerAccountMismatch);
             }
 
             let cost = (order.price as u64).checked_mul(fill_amount).ok_or(NflError::MathOverflow)?;
 
-            // 1. Transfer USDC: Buyer -> Seller
+            // 1. Payment Transfer: Buyer pays Seller (Collateral/USDC) directly
             let cpi_pay = Transfer {
                 from: ctx.accounts.buyer_collateral_ata.to_account_info(),
                 to: seller_collateral_ata_info.clone(),
@@ -342,25 +367,29 @@ pub mod nfl_blockchain {
             };
             token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_pay), cost)?;
 
-            // 2. Transfer Outcome Token: Vault -> Buyer
+            // 2. Asset Transfer: Vault releases Outcome Tokens to Buyer
+            // Signed by the OrderBook PDA
             let vault = if want_yes { ctx.accounts.yes_vault.to_account_info() } else { ctx.accounts.no_vault.to_account_info() };
             let cpi_receive = Transfer {
                 from: vault,
                 to: ctx.accounts.buyer_receive_token_ata.to_account_info(),
-                // Use the pre-fetched immutable info here
-                authority: order_book_info.clone(), 
+                authority: order_book_info.clone(), // Use the immutable reference here
             };
             token::transfer(CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_receive, signer), fill_amount)?;
 
+            // Update state
             order.quantity -= fill_amount;
             quantity_to_buy -= fill_amount;
 
+            // If order is fully filled, remove it. Else, move to next.
             if order.quantity == 0 { ob.orders.swap_remove(i); } else { i += 1; }
         }
         
         Ok(())
     }
 
+    /// Buy Exact: Identical to Market Buy, but verifies liquidity and price constraints FIRST.
+    /// This is atomic: if the full quantity cannot be bought under max_price, the transaction fails.
     pub fn buy_exact<'info>(
         ctx: Context<'_, '_, '_, 'info, MarketBuyAccounts<'info>>, 
         params: BuyExactParams
@@ -368,25 +397,25 @@ pub mod nfl_blockchain {
         let mut quantity_to_buy = params.quantity;
         let want_yes = params.want_yes;
 
-        // FIX: Extract AccountInfo FIRST (Immutable Borrow)
         let order_book_info = ctx.accounts.order_book.to_account_info();
-
-        // FIX: Then Borrow Mutably (Mutable Borrow)
         let ob = &mut ctx.accounts.order_book;
-        
         let mut remaining_iter = ctx.remaining_accounts.iter();
 
-        // 1. Validation Logic
+        // Check if the trade is possible BEFORE moving any funds.
         let mut needed = quantity_to_buy;
         for order in ob.orders.iter() {
             if order.is_yes != want_yes { continue; }
             if needed == 0 { break; }
+            
+            // If we hit an order that is too expensive, the whole trade fails
             if order.price > params.max_price { return err!(NflError::TooExpensive); }
+            
             needed = needed.saturating_sub(order.quantity);
         }
+        // If we processed all orders and still need tokens, fail.
         if needed > 0 { return err!(NflError::InsufficientLiquidity); }
 
-        // 2. Execution Logic
+        // Execute Trade (see more details in market_buy above)
         let market_key = ctx.accounts.market.key();
         let bump = ctx.bumps.order_book;
         let seeds = &[
@@ -424,7 +453,6 @@ pub mod nfl_blockchain {
             let cpi_receive = Transfer {
                 from: vault,
                 to: ctx.accounts.buyer_receive_token_ata.to_account_info(),
-                // Use the pre-fetched immutable info here
                 authority: order_book_info.clone(),
             };
             token::transfer(CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_receive, signer), fill_amount)?;
@@ -437,7 +465,6 @@ pub mod nfl_blockchain {
         Ok(())
     }
 }
-
 // --- Accounts ---
 
 #[derive(Accounts)]
@@ -811,12 +838,17 @@ pub enum NflError {
     CannotRedeemForOutcome,
     #[msg("User has no winning tokens to redeem.")]
     NothingToRedeem,
-    
-    // NEW Errors for Order Book
-    #[msg("Order book is full")] OrderBookFull,
-    #[msg("Missing seller accounts in remaining_accounts")] MissingSellerAccounts,
-    #[msg("Math overflow")] MathOverflow,
-    #[msg("Seller account mismatch")] SellerAccountMismatch,
-    #[msg("Too expensive")] TooExpensive,
-    #[msg("Insufficient liquidity to fill order")] InsufficientLiquidity,
+    // Order Book Errors
+    #[msg("Order book is full")] 
+    OrderBookFull,
+    #[msg("Missing seller accounts in remaining_accounts")] 
+    MissingSellerAccounts,
+    #[msg("Math overflow")] 
+    MathOverflow,
+    #[msg("Seller account mismatch")] 
+    SellerAccountMismatch,
+    #[msg("Too expensive")] 
+    TooExpensive,
+    #[msg("Insufficient liquidity to fill order")] 
+    InsufficientLiquidity,
 }
