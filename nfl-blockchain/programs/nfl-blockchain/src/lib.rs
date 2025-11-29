@@ -1,13 +1,22 @@
-//! # NFL Blockchain
-//!
-//! This program implements a binary prediction market on Solana using the Anchor framework.
-//! It allows for the creation of markets, minting of YES/NO token pairs backed by collateral,
-//! resolution of markets to final outcomes, and redemption of winning tokens for collateral.
-
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer}; // Removed unused MintTo
 
 declare_id!("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc");
+
+// --- Instruction Data Structs ---
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct MarketBuyParams {
+    pub quantity: u64,
+    pub want_yes: bool,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct BuyExactParams {
+    pub max_price: u64,
+    pub quantity: u64,
+    pub want_yes: bool,
+}
 
 /// NFL Blockchain program.
 #[program]
@@ -15,12 +24,6 @@ pub mod nfl_blockchain {
     use super::*;
 
     /// Create a new binary market.
-    ///
-    /// This:
-    /// - creates the Market account
-    /// - creates YES and NO SPL mints
-    /// - creates a collateral vault for the market
-    /// - wires all of them to a PDA authority
     pub fn create_market(ctx: Context<CreateMarket>, expiry_ts: i64) -> Result<()> {
         require!(expiry_ts > 0, NflError::InvalidExpiry);
 
@@ -49,11 +52,7 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
-    /// Mint YES/NO pairs:
-    ///
-    /// - User deposits `amount` units of collateral into the market vault
-    /// - Program mints `amount` YES tokens to user
-    /// - Program mints `amount` NO tokens to user
+    /// Mint YES/NO pairs.
     pub fn mint_pairs(ctx: Context<MintPairs>, amount: u64) -> Result<()> {
         require!(amount > 0, NflError::InvalidAmount);
 
@@ -94,7 +93,7 @@ pub mod nfl_blockchain {
             token::transfer(cpi_ctx, amount)?;
         }
 
-        // PDA seeds for market_authority (the mint/vault authority)
+        // PDA seeds for market_authority
         let market_key = market.key();
         let signer_seeds: &[&[u8]] = &[
             b"market_auth",
@@ -143,25 +142,18 @@ pub mod nfl_blockchain {
         Ok(())
     }
 
-    /// Resolve a market to a final outcome (Yes / No / Invalid).
-    ///
-    /// - Only `market.authority` may resolve.
-    /// - Must be called after `expiry_ts`.
-    /// - Sets `market.status = Resolved` and `market.outcome`.
+    /// Resolve a market to a final outcome.
     pub fn resolve_market(ctx: Context<ResolveMarket>, outcome: Outcome) -> Result<()> {
         let market = &mut ctx.accounts.market;
 
-        // Must not already be resolved
         require!(
             market.status != MarketStatus::Resolved,
             NflError::MarketAlreadyResolved
         );
 
-        // Must be past expiry
         let now = Clock::get()?.unix_timestamp;
         require!(now >= market.expiry_ts, NflError::MarketNotExpired);
 
-        // Only allow resolution to a non-pending outcome
         require!(
             matches!(outcome, Outcome::Yes | Outcome::No | Outcome::Invalid),
             NflError::InvalidResolutionOutcome
@@ -181,21 +173,14 @@ pub mod nfl_blockchain {
     }
 
     /// Redeem winning YES/NO tokens for collateral.
-    ///
-    /// - Market must be `Resolved`.
-    /// - If outcome = YES: burns user's YES and sends USDC from vault.
-    /// - If outcome = NO: burns user's NO and sends USDC from vault.
-    /// - Outcome = Invalid / Pending: not redeemable.
     pub fn redeem(ctx: Context<Redeem>) -> Result<()> {
         let market = &ctx.accounts.market;
 
-        // Market must be resolved
         require!(
             market.status == MarketStatus::Resolved,
             NflError::MarketNotResolved
         );
 
-        // Choose the winning mint and ATA based on outcome
         let (winner_mint_ai, winner_ata_ai, winner_amount) = match market.outcome {
             Outcome::Yes => (
                 ctx.accounts.yes_mint.to_account_info(),
@@ -212,7 +197,6 @@ pub mod nfl_blockchain {
             }
         };
 
-        // Nothing to redeem
         require!(winner_amount > 0, NflError::NothingToRedeem);
 
         // Burn the winning tokens
@@ -258,42 +242,434 @@ pub mod nfl_blockchain {
 
         Ok(())
     }
+
+    // -------------------------------------------------------------------------
+    // NEW: ORDER BOOK FUNCTIONALITY
+    // -------------------------------------------------------------------------
+
+    pub fn initialize_order_book(ctx: Context<InitializeOrderBook>) -> Result<()> {
+        let ob = &mut ctx.accounts.order_book;
+        ob.market = ctx.accounts.market.key();
+        ob.next_order_id = 0;
+        ob.capacity = 100;
+        msg!("Order Book initialized for Market: {}", ctx.accounts.market.key());
+        Ok(())
+    }
+
+    pub fn place_limit_sell(ctx: Context<PlaceLimitSell>, price: u64, quantity: u64, is_yes: bool) -> Result<()> {
+        require!(quantity > 0, NflError::InvalidAmount);
+        
+        let (from_account, to_vault) = if is_yes {
+            (&ctx.accounts.seller_token_ata, &ctx.accounts.yes_vault)
+        } else {
+            (&ctx.accounts.seller_token_ata, &ctx.accounts.no_vault)
+        };
+
+        let cpi_accounts = Transfer {
+            from: from_account.to_account_info(),
+            to: to_vault.to_account_info(),
+            authority: ctx.accounts.seller.to_account_info(),
+        };
+        token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts), quantity)?;
+
+        let ob = &mut ctx.accounts.order_book;
+        let order_id = ob.next_order_id;
+        ob.next_order_id = order_id.checked_add(1).unwrap();
+
+        if ob.orders.len() as u64 >= ob.capacity {
+            return err!(NflError::OrderBookFull);
+        }
+
+        ob.orders.push(Order {
+            id: order_id,
+            owner: ctx.accounts.seller.key(),
+            seller_receive_collateral_ata: ctx.accounts.seller_receive_collateral_ata.key(),
+            price,
+            quantity,
+            is_yes,
+        });
+
+        msg!("Order Placed: ID={}, Price={}, Qty={}, IsYes={}", order_id, price, quantity, is_yes);
+        Ok(())
+    }
+
+    pub fn market_buy<'info>(
+        ctx: Context<'_, '_, '_, 'info, MarketBuyAccounts<'info>>, 
+        params: MarketBuyParams
+    ) -> Result<()> {
+        let mut quantity_to_buy = params.quantity;
+        let want_yes = params.want_yes;
+
+        // FIX: Extract AccountInfo FIRST (Immutable Borrow)
+        let order_book_info = ctx.accounts.order_book.to_account_info();
+
+        // FIX: Then Borrow Mutably (Mutable Borrow)
+        let ob = &mut ctx.accounts.order_book;
+        
+        let mut remaining_iter = ctx.remaining_accounts.iter();
+
+        // Prepare PDA signer
+        let market_key = ctx.accounts.market.key();
+        let bump = ctx.bumps.order_book;
+        let seeds = &[
+            b"orderbook",
+            market_key.as_ref(),
+            &[bump],
+        ];
+        let signer = &[&seeds[..]];
+
+        let mut i = 0;
+        while i < ob.orders.len() && quantity_to_buy > 0 {
+            let order = &mut ob.orders[i];
+
+            if order.is_yes != want_yes { i += 1; continue; }
+            if order.quantity == 0 { ob.orders.swap_remove(i); continue; }
+
+            let fill_amount = order.quantity.min(quantity_to_buy);
+            let seller_collateral_ata_info = remaining_iter.next().ok_or(NflError::MissingSellerAccounts)?;
+
+            if seller_collateral_ata_info.key() != order.seller_receive_collateral_ata {
+                return err!(NflError::SellerAccountMismatch);
+            }
+
+            let cost = (order.price as u64).checked_mul(fill_amount).ok_or(NflError::MathOverflow)?;
+
+            // 1. Transfer USDC: Buyer -> Seller
+            let cpi_pay = Transfer {
+                from: ctx.accounts.buyer_collateral_ata.to_account_info(),
+                to: seller_collateral_ata_info.clone(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            };
+            token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_pay), cost)?;
+
+            // 2. Transfer Outcome Token: Vault -> Buyer
+            let vault = if want_yes { ctx.accounts.yes_vault.to_account_info() } else { ctx.accounts.no_vault.to_account_info() };
+            let cpi_receive = Transfer {
+                from: vault,
+                to: ctx.accounts.buyer_receive_token_ata.to_account_info(),
+                // Use the pre-fetched immutable info here
+                authority: order_book_info.clone(), 
+            };
+            token::transfer(CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_receive, signer), fill_amount)?;
+
+            order.quantity -= fill_amount;
+            quantity_to_buy -= fill_amount;
+
+            if order.quantity == 0 { ob.orders.swap_remove(i); } else { i += 1; }
+        }
+        
+        Ok(())
+    }
+
+    pub fn buy_exact<'info>(
+        ctx: Context<'_, '_, '_, 'info, MarketBuyAccounts<'info>>, 
+        params: BuyExactParams
+    ) -> Result<()> {
+        let mut quantity_to_buy = params.quantity;
+        let want_yes = params.want_yes;
+
+        // FIX: Extract AccountInfo FIRST (Immutable Borrow)
+        let order_book_info = ctx.accounts.order_book.to_account_info();
+
+        // FIX: Then Borrow Mutably (Mutable Borrow)
+        let ob = &mut ctx.accounts.order_book;
+        
+        let mut remaining_iter = ctx.remaining_accounts.iter();
+
+        // 1. Validation Logic
+        let mut needed = quantity_to_buy;
+        for order in ob.orders.iter() {
+            if order.is_yes != want_yes { continue; }
+            if needed == 0 { break; }
+            if order.price > params.max_price { return err!(NflError::TooExpensive); }
+            needed = needed.saturating_sub(order.quantity);
+        }
+        if needed > 0 { return err!(NflError::InsufficientLiquidity); }
+
+        // 2. Execution Logic
+        let market_key = ctx.accounts.market.key();
+        let bump = ctx.bumps.order_book;
+        let seeds = &[
+            b"orderbook",
+            market_key.as_ref(),
+            &[bump],
+        ];
+        let signer = &[&seeds[..]];
+
+        let mut i = 0;
+        while i < ob.orders.len() && quantity_to_buy > 0 {
+            let order = &mut ob.orders[i];
+            if order.is_yes != want_yes { i += 1; continue; }
+            if order.quantity == 0 { ob.orders.swap_remove(i); continue; }
+
+            let fill_amount = order.quantity.min(quantity_to_buy);
+            let seller_collateral_ata_info = remaining_iter.next().ok_or(NflError::MissingSellerAccounts)?;
+
+            if seller_collateral_ata_info.key() != order.seller_receive_collateral_ata {
+                return err!(NflError::SellerAccountMismatch);
+            }
+
+            let cost = (order.price as u64).checked_mul(fill_amount).unwrap();
+
+            // Buyer pays Seller
+            let cpi_pay = Transfer {
+                from: ctx.accounts.buyer_collateral_ata.to_account_info(),
+                to: seller_collateral_ata_info.clone(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            };
+            token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_pay), cost)?;
+
+            // Vault releases tokens to Buyer
+            let vault = if want_yes { ctx.accounts.yes_vault.to_account_info() } else { ctx.accounts.no_vault.to_account_info() };
+            let cpi_receive = Transfer {
+                from: vault,
+                to: ctx.accounts.buyer_receive_token_ata.to_account_info(),
+                // Use the pre-fetched immutable info here
+                authority: order_book_info.clone(),
+            };
+            token::transfer(CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_receive, signer), fill_amount)?;
+
+            order.quantity -= fill_amount;
+            quantity_to_buy -= fill_amount;
+
+            if order.quantity == 0 { ob.orders.swap_remove(i); } else { i += 1; }
+        }
+        Ok(())
+    }
 }
 
-/// On-chain state for a single binary contract market.
+// --- Accounts ---
+
+#[derive(Accounts)]
+pub struct CreateMarket<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + Market::SIZE
+    )]
+    pub market: Account<'info, Market>,
+
+    pub base_mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = authority,
+        mint::decimals = base_mint.decimals,
+        mint::authority = market_authority
+    )]
+    pub yes_mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = authority,
+        mint::decimals = base_mint.decimals,
+        mint::authority = market_authority
+    )]
+    pub no_mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = authority,
+        token::mint = base_mint,
+        token::authority = market_authority
+    )]
+    pub vault: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"market_auth", market.key().as_ref()],
+        bump
+    )]
+    /// CHECK: PDA authority, no data.
+    pub market_authority: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeOrderBook<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    
+    #[account(
+        init, 
+        payer = authority, 
+        space = 8 + 32 + 8 + 8 + 4 + (89 * 100), 
+        seeds = [b"orderbook", market.key().as_ref()], 
+        bump
+    )]
+    pub order_book: Account<'info, OrderBook>,
+    
+    pub market: Account<'info, Market>,
+    
+    pub yes_mint: Account<'info, Mint>,
+    pub no_mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = authority,
+        token::mint = yes_mint,
+        token::authority = order_book,
+        seeds = [b"yes_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub yes_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        init,
+        payer = authority,
+        token::mint = no_mint,
+        token::authority = order_book,
+        seeds = [b"no_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub no_vault: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct MintPairs<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = user_collateral_ata.owner == user.key(),
+        constraint = user_collateral_ata.mint == market.base_mint
+    )]
+    pub user_collateral_ata: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        has_one = base_mint,
+        has_one = yes_mint,
+        has_one = no_mint,
+        has_one = vault
+    )]
+    pub market: Account<'info, Market>,
+
+    pub base_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub yes_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub no_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = user_yes_ata.owner == user.key(),
+        constraint = user_yes_ata.mint == yes_mint.key()
+    )]
+    pub user_yes_ata: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = user_no_ata.owner == user.key(),
+        constraint = user_no_ata.mint == no_mint.key()
+    )]
+    pub user_no_ata: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"market_auth", market.key().as_ref()],
+        bump = market.market_authority_bump
+    )]
+    /// CHECK: PDA authority, no data.
+    pub market_authority: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct PlaceLimitSell<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+    
+    #[account(mut)]
+    pub seller_token_ata: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub seller_receive_collateral_ata: Account<'info, TokenAccount>,
+    
+    #[account(mut, seeds = [b"orderbook", market.key().as_ref()], bump)]
+    pub order_book: Account<'info, OrderBook>,
+    
+    #[account(
+        mut, 
+        seeds = [b"yes_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub yes_vault: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut, 
+        seeds = [b"no_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub no_vault: Account<'info, TokenAccount>,
+    
+    pub market: Account<'info, Market>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct MarketBuyAccounts<'info> {
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    
+    #[account(mut, constraint = buyer_collateral_ata.mint == market.base_mint)]
+    pub buyer_collateral_ata: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub buyer_receive_token_ata: Account<'info, TokenAccount>,
+    
+    pub market: Account<'info, Market>,
+    
+    #[account(mut, seeds = [b"orderbook", market.key().as_ref()], bump)]
+    pub order_book: Account<'info, OrderBook>,
+    
+    #[account(
+        mut, 
+        seeds = [b"yes_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub yes_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        seeds = [b"no_vault", order_book.key().as_ref()],
+        bump
+    )]
+    pub no_vault: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 pub struct Market {
-    /// Authority (exchange admin or oracle setter).
     pub authority: Pubkey,
-
-    /// Collateral mint used for payouts (e.g., USDC).
     pub base_mint: Pubkey,
-
-    /// YES SPL mint for this market.
     pub yes_mint: Pubkey,
-
-    /// NO SPL mint for this market.
     pub no_mint: Pubkey,
-
-    /// Collateral vault token account (base_mint) for this market.
     pub vault: Pubkey,
-
-    /// UNIX timestamp after which the market can be resolved.
     pub expiry_ts: i64,
-
-    /// Trading lifecycle status.
     pub status: MarketStatus,
-
-    /// Final event outcome (pending until resolved).
     pub outcome: Outcome,
-
-    /// Bump for the market_authority PDA.
     pub market_authority_bump: u8,
 }
 
 impl Market {
-    /// Size of the Market account (excluding 8-byte discriminator)
-    pub const SIZE: usize =
+    pub const SIZE: usize = 
           32   // authority
         + 32   // base_mint
         + 32   // yes_mint
@@ -306,141 +682,29 @@ impl Market {
     ;
 }
 
-/// Create a market, YES/NO mints, and vault.
-#[derive(Accounts)]
-pub struct CreateMarket<'info> {
-    /// Exchange admin creating the market.
-    #[account(mut)]
-    pub authority: Signer<'info>,
-
-    /// The Market account to initialize.
-    #[account(
-        init,
-        payer = authority,
-        space = 8 + Market::SIZE
-    )]
-    pub market: Account<'info, Market>,
-
-    /// Collateral mint for this market (e.g. USDC).
-    pub base_mint: Account<'info, Mint>,
-
-    /// YES SPL mint for this market.
-    #[account(
-        init,
-        payer = authority,
-        mint::decimals = base_mint.decimals,
-        mint::authority = market_authority
-    )]
-    pub yes_mint: Account<'info, Mint>,
-
-    /// NO SPL mint for this market.
-    #[account(
-        init,
-        payer = authority,
-        mint::decimals = base_mint.decimals,
-        mint::authority = market_authority
-    )]
-    pub no_mint: Account<'info, Mint>,
-
-    /// Vault token account that holds collateral for this market.
-    #[account(
-        init,
-        payer = authority,
-        token::mint = base_mint,
-        token::authority = market_authority
-    )]
-    pub vault: Account<'info, TokenAccount>,
-
-    /// PDA that acts as authority for mints and vault.
-    #[account(
-        seeds = [b"market_auth", market.key().as_ref()],
-        bump
-    )]
-    /// CHECK: PDA authority, no data.
-    pub market_authority: UncheckedAccount<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-
-    /// Needed by init for rent-exempt accounts.
-    pub rent: Sysvar<'info, Rent>,
+#[account]
+pub struct OrderBook {
+    pub market: Pubkey,
+    pub next_order_id: u64,
+    pub capacity: u64,
+    pub orders: Vec<Order>,
 }
 
-/// Mints YES/NO pairs backed by deposited collateral.
-#[derive(Accounts)]
-pub struct MintPairs<'info> {
-    /// User minting YES/NO exposure.
-    #[account(mut)]
-    pub user: Signer<'info>,
-
-    /// User's collateral account (base_mint).
-    #[account(
-        mut,
-        constraint = user_collateral_ata.owner == user.key(),
-        constraint = user_collateral_ata.mint == market.base_mint
-    )]
-    pub user_collateral_ata: Account<'info, TokenAccount>,
-
-    /// Market configuration.
-    #[account(
-        mut,
-        has_one = base_mint,
-        has_one = yes_mint,
-        has_one = no_mint,
-        has_one = vault
-    )]
-    pub market: Account<'info, Market>,
-
-    /// Collateral mint (matches market.base_mint).
-    pub base_mint: Account<'info, Mint>,
-
-    /// YES mint (matches market.yes_mint).
-    #[account(mut)]
-    pub yes_mint: Account<'info, Mint>,
-
-    /// NO mint (matches market.no_mint).
-    #[account(mut)]
-    pub no_mint: Account<'info, Mint>,
-
-    /// Market's collateral vault.
-    #[account(mut)]
-    pub vault: Account<'info, TokenAccount>,
-
-    /// User's YES token account.
-    #[account(
-        mut,
-        constraint = user_yes_ata.owner == user.key(),
-        constraint = user_yes_ata.mint == yes_mint.key()
-    )]
-    pub user_yes_ata: Account<'info, TokenAccount>,
-
-    /// User's NO token account.
-    #[account(
-        mut,
-        constraint = user_no_ata.owner == user.key(),
-        constraint = user_no_ata.mint == no_mint.key()
-    )]
-    pub user_no_ata: Account<'info, TokenAccount>,
-
-    /// PDA authority used to mint YES/NO and control the vault.
-    #[account(
-        seeds = [b"market_auth", market.key().as_ref()],
-        bump = market.market_authority_bump
-    )]
-    /// CHECK: PDA authority, no data.
-    pub market_authority: UncheckedAccount<'info>,
-
-    pub token_program: Program<'info, Token>,
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Order {
+    pub id: u64,
+    pub owner: Pubkey,
+    pub seller_receive_collateral_ata: Pubkey,
+    pub price: u64,
+    pub quantity: u64,
+    pub is_yes: bool,
 }
 
-/// Resolve a market to a final outcome.
 #[derive(Accounts)]
 pub struct ResolveMarket<'info> {
-    /// Must match `market.authority`.
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    /// The market being resolved.
     #[account(
         mut,
         has_one = authority
@@ -448,14 +712,11 @@ pub struct ResolveMarket<'info> {
     pub market: Account<'info, Market>,
 }
 
-/// Redeem winning YES/NO tokens for collateral.
 #[derive(Accounts)]
 pub struct Redeem<'info> {
-    /// User redeeming their winning tokens.
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// Market config; ties everything together.
     #[account(
         mut,
         has_one = base_mint,
@@ -465,22 +726,17 @@ pub struct Redeem<'info> {
     )]
     pub market: Account<'info, Market>,
 
-    /// Collateral mint (e.g. USDC).
     pub base_mint: Account<'info, Mint>,
 
-    /// YES mint.
     #[account(mut)]
     pub yes_mint: Account<'info, Mint>,
 
-    /// NO mint.
     #[account(mut)]
     pub no_mint: Account<'info, Mint>,
 
-    /// Market's collateral vault (holds base_mint).
     #[account(mut)]
     pub vault: Account<'info, TokenAccount>,
 
-    /// User's collateral account (will receive redeemed USDC).
     #[account(
         mut,
         constraint = user_collateral_ata.owner == user.key(),
@@ -488,7 +744,6 @@ pub struct Redeem<'info> {
     )]
     pub user_collateral_ata: Account<'info, TokenAccount>,
 
-    /// User's YES token account.
     #[account(
         mut,
         constraint = user_yes_ata.owner == user.key(),
@@ -496,7 +751,6 @@ pub struct Redeem<'info> {
     )]
     pub user_yes_ata: Account<'info, TokenAccount>,
 
-    /// User's NO token account.
     #[account(
         mut,
         constraint = user_no_ata.owner == user.key(),
@@ -504,7 +758,6 @@ pub struct Redeem<'info> {
     )]
     pub user_no_ata: Account<'info, TokenAccount>,
 
-    /// PDA that controls vault + mints.
     #[account(
         seeds = [b"market_auth", market.key().as_ref()],
         bump = market.market_authority_bump
@@ -516,25 +769,18 @@ pub struct Redeem<'info> {
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MarketStatus {
-    /// Market open.
-    Open,
-    /// Trading halted but not settled.
-    Halted,
-    /// Market resolved; settlement allowed.
-    Resolved,
+pub enum MarketStatus { 
+    Open, 
+    Halted, 
+    Resolved 
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// No resolution yet.
-    Pending,
-    /// YES is the winning side.
-    Yes,
-    /// NO is the winning side.
-    No,
-    /// Invalid: event ambiguous or nullified.
-    Invalid,
+pub enum Outcome { 
+    Pending, 
+    Yes, 
+    No, 
+    Invalid 
 }
 
 #[error_code]
@@ -565,4 +811,12 @@ pub enum NflError {
     CannotRedeemForOutcome,
     #[msg("User has no winning tokens to redeem.")]
     NothingToRedeem,
+    
+    // NEW Errors for Order Book
+    #[msg("Order book is full")] OrderBookFull,
+    #[msg("Missing seller accounts in remaining_accounts")] MissingSellerAccounts,
+    #[msg("Math overflow")] MathOverflow,
+    #[msg("Seller account mismatch")] SellerAccountMismatch,
+    #[msg("Too expensive")] TooExpensive,
+    #[msg("Insufficient liquidity to fill order")] InsufficientLiquidity,
 }
