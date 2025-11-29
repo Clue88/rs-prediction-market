@@ -63,3 +63,10 @@ A number of tests to test various parts of the market lifecycle are included in 
 tests cover the core market instructions (`create_market`, `mint_pairs`, `resolve_market`, and `redeem`), 
 the order book exchange mechanism (`initialize_order_book`, `place_limit_sell`, `market_buy`, and `buy_exact`), 
 and some invariants (e.g., can't redeem twice, losers can't redeem). 
+
+Tests may fail if executed in parallel. If tests failing at first, try the following command:
+
+```bash
+RUST_TEST_THREADS=1 anchor test
+```
+
