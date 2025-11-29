@@ -8,7 +8,6 @@ use anchor_spl::token::TokenAccount;
 use crate::test_utils::*;
 
 // --- Helpers ---
-
 fn get_orderbook_pda(market: Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[b"orderbook", market.as_ref()],
@@ -36,14 +35,17 @@ fn fund_account(program: &anchor_client::Program<&Keypair>, payer: &Keypair, to:
 
 #[test]
 fn test_01_init_order_book() {
+    // Setup the client and create the required Market and mints before attaching an Order Book
     let (program, payer) = setup_client();
     let base_mint = create_mint(&program, payer).pubkey();
     let (market_kp, yes_mint_kp, no_mint_kp, _, _) = create_market(&program, payer, base_mint);
 
+    // Derive the deterministic addresses (PDAs) where the Order Book and its vaults will live
     let order_book_pda = get_orderbook_pda(market_kp.pubkey());
     let yes_vault_pda = get_ob_vault_pda(order_book_pda, true);
     let no_vault_pda = get_ob_vault_pda(order_book_pda, false);
 
+    // Send the transaction to initialize the Order Book and create the token vaults on-chain
     program.request()
         .accounts(nfl_blockchain::accounts::InitializeOrderBook {
             authority: payer.pubkey(),
@@ -61,12 +63,14 @@ fn test_01_init_order_book() {
         .send()
         .unwrap();
 
+    // Fetch the newly created account to verify it exists with the correct default state
     let ob_account: nfl_blockchain::OrderBook = program.account(order_book_pda).unwrap();
     assert_eq!(ob_account.capacity, 100);
 }
 
 #[test]
 fn test_02_place_limit_sell() {
+    // Initialize the market and order book infrastructure required for trading
     let (program, payer) = setup_client();
     let base_mint = create_mint(&program, payer).pubkey();
     let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, market_authority) = create_market(&program, payer, base_mint);
@@ -82,7 +86,7 @@ fn test_02_place_limit_sell() {
         token_program: anchor_spl::token::spl_token::id(), system_program: anchor_client::solana_sdk::system_program::id(), rent: anchor_client::solana_sdk::sysvar::rent::id(),
     }).args(nfl_blockchain::instruction::InitializeOrderBook {}).send().unwrap();
 
-    // In this test, Payer is the Seller
+    // Fund the user with collateral and mint YES/NO pairs to acquire the specific outcome tokens needed to place a sell order
     let user_collateral = create_ata(&program, payer, payer.pubkey(), base_mint);
     mint_tokens(&program, payer, base_mint, user_collateral, 100);
     
@@ -94,6 +98,7 @@ fn test_02_place_limit_sell() {
     let price = 50;
     let quantity = 10;
     
+    // Submit the Limit Sell transaction to escrow the tokens and list the order on the book
     program.request()
         .accounts(nfl_blockchain::accounts::PlaceLimitSell {
             seller: payer.pubkey(),
@@ -109,6 +114,7 @@ fn test_02_place_limit_sell() {
         .send()
         .unwrap();
 
+    // Query the on-chain Order Book account to confirm the order was successfully recorded
     let ob_account: nfl_blockchain::OrderBook = program.account(order_book_pda).unwrap();
     assert_eq!(ob_account.orders.len(), 1);
     assert_eq!(ob_account.orders[0].price, 50);
@@ -116,7 +122,7 @@ fn test_02_place_limit_sell() {
 
 #[test]
 fn test_03_market_buy_full_fill() {
-    println!("DEBUG: Starting test_03...");
+    // Initialize the market and order book infrastructure required for trading
     let (program, payer) = setup_client();
     let base_mint = create_mint(&program, payer).pubkey();
     let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, market_authority) = create_market(&program, payer, base_mint);
@@ -125,7 +131,6 @@ fn test_03_market_buy_full_fill() {
     let yes_vault_pda = get_ob_vault_pda(order_book_pda, true);
     let no_vault_pda = get_ob_vault_pda(order_book_pda, false);
 
-    // 1. Init Order Book
     program.request().accounts(nfl_blockchain::accounts::InitializeOrderBook {
         authority: payer.pubkey(), order_book: order_book_pda, market: market_kp.pubkey(),
         yes_mint: yes_mint_kp.pubkey(), no_mint: no_mint_kp.pubkey(),
@@ -133,15 +138,14 @@ fn test_03_market_buy_full_fill() {
         token_program: anchor_spl::token::spl_token::id(), system_program: anchor_client::solana_sdk::system_program::id(), rent: anchor_client::solana_sdk::sysvar::rent::id(),
     }).args(nfl_blockchain::instruction::InitializeOrderBook {}).send().unwrap();
 
-    // 2. SELLER SETUP
+    // Create a distinct Seller identity and fund them with collateral to mint the YES tokens they intend to sell
     let seller_kp = Keypair::new();
     fund_account(&program, payer, &seller_kp.pubkey(), 1_000_000_000); 
 
     let seller_collateral = create_ata(&program, payer, seller_kp.pubkey(), base_mint);
     mint_tokens(&program, payer, base_mint, seller_collateral, 100);
     
-    // --- MANUAL EXPANSION OF mint_pairs_for_user FOR SELLER ---
-    // We do this manually to ensure we can Sign as the Seller
+    // Manually construct the mint transaction to ensure the new Seller keypair signs it correctly
     let seller_yes = create_ata(&program, payer, seller_kp.pubkey(), yes_mint_kp.pubkey());
     let seller_no = create_ata(&program, payer, seller_kp.pubkey(), no_mint_kp.pubkey());
     
@@ -163,9 +167,8 @@ fn test_03_market_buy_full_fill() {
         .signer(&seller_kp) // <--- THIS IS THE FIX (Sign as Seller)
         .send()
         .unwrap();
-    // -----------------------------------------------------------
 
-    // Seller Places Order
+    // Seller places a Limit Sell order, escrowing their YES tokens into the program vault
     program.request()
         .accounts(nfl_blockchain::accounts::PlaceLimitSell {
             seller: seller_kp.pubkey(), seller_token_ata: seller_yes, seller_receive_collateral_ata: seller_collateral,
@@ -175,13 +178,12 @@ fn test_03_market_buy_full_fill() {
         .signer(&seller_kp)
         .send().unwrap();
 
-    // 3. BUYER SETUP (Using Payer) 
+    // Buyer (acting as the default Payer) executes a Market Buy to purchase 10 YES tokens at the best available price 
     let buyer_pubkey = payer.pubkey();
     let buyer_collateral = create_ata(&program, payer, buyer_pubkey, base_mint);
     let buyer_yes = create_ata(&program, payer, buyer_pubkey, yes_mint_kp.pubkey());
     mint_tokens(&program, payer, base_mint, buyer_collateral, 1000);
 
-    // 4. Market Buy
     println!("DEBUG: Sending Market Buy transaction...");
     program.request()
         .accounts(nfl_blockchain::accounts::MarketBuyAccounts {
@@ -202,7 +204,7 @@ fn test_03_market_buy_full_fill() {
         .send() 
         .unwrap();
 
-    // Verify
+    // Verify the atomic swap: Buyer received the outcome tokens, Seller received the USDC collateral, and the order was removed
     let buyer_yes_acc: TokenAccount = program.account(buyer_yes).unwrap();
     assert_eq!(buyer_yes_acc.amount, 10); 
 
@@ -215,7 +217,7 @@ fn test_03_market_buy_full_fill() {
 
 #[test]
 fn test_04_buy_exact_fail_too_expensive() {
-    println!("DEBUG: Starting test_04...");
+    // Initialize the market and order book infrastructure required for trading
     let (program, payer) = setup_client();
     let base_mint = create_mint(&program, payer).pubkey();
     let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, market_authority) = create_market(&program, payer, base_mint);
@@ -231,11 +233,10 @@ fn test_04_buy_exact_fail_too_expensive() {
         token_program: anchor_spl::token::spl_token::id(), system_program: anchor_client::solana_sdk::system_program::id(), rent: anchor_client::solana_sdk::sysvar::rent::id(),
     }).args(nfl_blockchain::instruction::InitializeOrderBook {}).send().unwrap();
 
-    // Seller (Payer) places order @ 80
+    // Place a Limit Sell order at a price of 80 to establish liquidity on the book that is intentionally too expensive for the test case
     let seller_collateral = create_ata(&program, payer, payer.pubkey(), base_mint);
     mint_tokens(&program, payer, base_mint, seller_collateral, 100);
     
-    // Note: mint_pairs_for_user creates the YES/NO ATAs for the user
     let (seller_yes, _) = mint_pairs_for_user(
         &program, market_kp.pubkey(), base_mint, yes_mint_kp.pubkey(), no_mint_kp.pubkey(),
         vault_kp.pubkey(), market_authority, payer, seller_collateral, 20
@@ -249,18 +250,14 @@ fn test_04_buy_exact_fail_too_expensive() {
         .args(nfl_blockchain::instruction::PlaceLimitSell { price: 80, quantity: 10, is_yes: true })
         .send().unwrap();
 
-    // Buyer (Payer) tries to Buy Exact with Max Price = 60
+    // Since the Buyer and Seller are the same entity in this test, reuse the existing collateral and token accounts to avoid errors
     let buyer_pubkey = payer.pubkey();
-    
-    // --- CRITICAL FIX: REUSE EXISTING ACCOUNTS ---
-    // Buyer == Seller, so they already have collateral and YES tokens.
     let buyer_collateral = seller_collateral; 
-    let buyer_yes = seller_yes; // <--- FIX: Do not call create_ata again!
-    // ---------------------------------------------
+    let buyer_yes = seller_yes; 
 
     mint_tokens(&program, payer, base_mint, buyer_collateral, 1000);
 
-    // 4. Buy Exact (Should Fail)
+    // Attempt to execute a Buy Exact order with a max price of 60, which should fail because the only available liquidity is priced at 80
     println!("DEBUG: Sending Buy Exact transaction...");
     let result = program.request()
         .accounts(nfl_blockchain::accounts::MarketBuyAccounts {
@@ -280,5 +277,6 @@ fn test_04_buy_exact_fail_too_expensive() {
         .signer(payer) 
         .send();
 
+    // Assert that the transaction was rejected by the program as expected, enforcing the price protection logic
     assert!(result.is_err());
 }
