@@ -44,14 +44,14 @@ unlocking the collateral vault for the winning side only:
 
 Each order book is represented by an `OrderBook` account and each order within the order book is represented by an `Order` struct:
 ```rust
-pub struct OrderBook {
+OrderBook {
     market: Pubkey,        // Market address
     next_order_id: u64,    // Unique ID counter
     capacity: u64,         // Max active orders
     orders: Vec<Order>,    // List of open orders
 }
 
-pub struct Order {
+Order {
     id: u64,                               // Order ID
     owner: Pubkey,                         // Seller wallet
     seller_receive_collateral_ata: Pubkey, // Seller payment account
