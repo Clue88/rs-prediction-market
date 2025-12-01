@@ -21,7 +21,7 @@ pub fn setup_client() -> (Program<&'static Keypair>, &'static Keypair) {
     let boxed = Box::new(kp);
     let payer: &'static Keypair = Box::leak(boxed);
 
-    let program_id = Pubkey::from_str("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc").unwrap();
+    let program_id = Pubkey::from_str("2qdp2bKXQHhRiD1kPS22Zyx3dxuevXkiRgvWKghHSGzx").unwrap();
 
     let client = Client::new_with_options(Cluster::Localnet, payer, CommitmentConfig::processed());
     let program = client.program(program_id).unwrap();
