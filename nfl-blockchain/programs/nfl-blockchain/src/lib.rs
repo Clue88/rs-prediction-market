@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer}; // Removed unused MintTo
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc");
 
@@ -325,6 +325,18 @@ pub mod nfl_blockchain {
         // Iterator for sellers passed in via 'remaining_accounts'
         let mut remaining_iter = ctx.remaining_accounts.iter();
 
+        // Sort primarily by Price (Ascending), then by ID (Ascending)
+        // This ensures that buying at best possible price 
+        // Should probably implement more efficient solution later
+        ob.orders.sort_by(|a, b| {
+            let price_cmp = a.price.cmp(&b.price);
+            if price_cmp == std::cmp::Ordering::Equal {
+                a.id.cmp(&b.id)
+            } else {
+                price_cmp
+            }
+        });
+
         // Prepare PDA signer seeds (needed to unlock tokens from the Vault)
         let market_key = ctx.accounts.market.key();
         let bump = ctx.bumps.order_book;
@@ -344,7 +356,7 @@ pub mod nfl_blockchain {
             if order.is_yes != want_yes { i += 1; continue; }
             
             // Cleanup: remove empty orders if encountered
-            if order.quantity == 0 { ob.orders.swap_remove(i); continue; }
+            if order.quantity == 0 { ob.orders.remove(i); continue; }
 
             // Determine how much to fill from this specific order
             let fill_amount = order.quantity.min(quantity_to_buy);
@@ -382,7 +394,7 @@ pub mod nfl_blockchain {
             quantity_to_buy -= fill_amount;
 
             // If order is fully filled, remove it. Else, move to next.
-            if order.quantity == 0 { ob.orders.swap_remove(i); } else { i += 1; }
+            if order.quantity == 0 { ob.orders.remove(i); } else { i += 1; }
         }
         
         Ok(())
@@ -400,6 +412,17 @@ pub mod nfl_blockchain {
         let order_book_info = ctx.accounts.order_book.to_account_info();
         let ob = &mut ctx.accounts.order_book;
         let mut remaining_iter = ctx.remaining_accounts.iter();
+
+        // Sort primarily by Price (Ascending), then by ID (Ascending)
+        // This ensures that buying at best possible price
+        ob.orders.sort_by(|a, b| {
+            let price_cmp = a.price.cmp(&b.price);
+            if price_cmp == std::cmp::Ordering::Equal {
+                a.id.cmp(&b.id)
+            } else {
+                price_cmp
+            }
+        });
 
         // Check if the trade is possible BEFORE moving any funds.
         let mut needed = quantity_to_buy;
@@ -429,7 +452,7 @@ pub mod nfl_blockchain {
         while i < ob.orders.len() && quantity_to_buy > 0 {
             let order = &mut ob.orders[i];
             if order.is_yes != want_yes { i += 1; continue; }
-            if order.quantity == 0 { ob.orders.swap_remove(i); continue; }
+            if order.quantity == 0 { ob.orders.remove(i); continue; }
 
             let fill_amount = order.quantity.min(quantity_to_buy);
             let seller_collateral_ata_info = remaining_iter.next().ok_or(NflError::MissingSellerAccounts)?;
@@ -460,7 +483,7 @@ pub mod nfl_blockchain {
             order.quantity -= fill_amount;
             quantity_to_buy -= fill_amount;
 
-            if order.quantity == 0 { ob.orders.swap_remove(i); } else { i += 1; }
+            if order.quantity == 0 { ob.orders.remove(i); } else { i += 1; }
         }
         Ok(())
     }

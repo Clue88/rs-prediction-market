@@ -280,3 +280,118 @@ fn test_04_buy_exact_fail_too_expensive() {
     // Assert that the transaction was rejected by the program as expected, enforcing the price protection logic
     assert!(result.is_err());
 }
+
+#[test]
+fn test_05_market_buy_best_price() {
+    println!("DEBUG: Starting test_market_buy_best_price...");
+    
+    // Initialize the market ecosystem
+    let (program, payer) = setup_client();
+    let base_mint = create_mint(&program, payer).pubkey();
+    let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, market_authority) = create_market(&program, payer, base_mint);
+
+    let order_book_pda = get_orderbook_pda(market_kp.pubkey());
+    let yes_vault_pda = get_ob_vault_pda(order_book_pda, true);
+    let no_vault_pda = get_ob_vault_pda(order_book_pda, false);
+
+    program.request().accounts(nfl_blockchain::accounts::InitializeOrderBook {
+        authority: payer.pubkey(), order_book: order_book_pda, market: market_kp.pubkey(),
+        yes_mint: yes_mint_kp.pubkey(), no_mint: no_mint_kp.pubkey(),
+        yes_vault: yes_vault_pda, no_vault: no_vault_pda,
+        token_program: anchor_spl::token::spl_token::id(), system_program: anchor_client::solana_sdk::system_program::id(), rent: anchor_client::solana_sdk::sysvar::rent::id(),
+    }).args(nfl_blockchain::instruction::InitializeOrderBook {}).send().unwrap();
+
+    // --- SELLER SETUP ---
+    let seller_kp = Keypair::new();
+    fund_account(&program, payer, &seller_kp.pubkey(), 1_000_000_000); 
+
+    let seller_collateral = create_ata(&program, payer, seller_kp.pubkey(), base_mint);
+    mint_tokens(&program, payer, base_mint, seller_collateral, 200); // More collateral needed for fees/rent
+    
+    // Mint 20 YES/NO pairs to the seller
+    let seller_yes = create_ata(&program, payer, seller_kp.pubkey(), yes_mint_kp.pubkey());
+    let seller_no = create_ata(&program, payer, seller_kp.pubkey(), no_mint_kp.pubkey());
+    
+    program.request()
+        .accounts(nfl_blockchain::accounts::MintPairs {
+            user: seller_kp.pubkey(), user_collateral_ata: seller_collateral, market: market_kp.pubkey(), base_mint,
+            yes_mint: yes_mint_kp.pubkey(), no_mint: no_mint_kp.pubkey(), vault: vault_kp.pubkey(),
+            user_yes_ata: seller_yes, user_no_ata: seller_no, market_authority, token_program: anchor_spl::token::spl_token::id(),
+        })
+        .args(nfl_blockchain::instruction::MintPairs { amount: 20 })
+        .signer(&seller_kp) 
+        .send().unwrap();
+
+    // --- PLACE ORDERS ---
+    
+    // 1. Place EXPENSIVE Order FIRST (Price: 80, Qty: 10)
+    // If logic is just "FIFO", the buyer would hit this one.
+    program.request()
+        .accounts(nfl_blockchain::accounts::PlaceLimitSell {
+            seller: seller_kp.pubkey(), seller_token_ata: seller_yes, seller_receive_collateral_ata: seller_collateral,
+            order_book: order_book_pda, yes_vault: yes_vault_pda, no_vault: no_vault_pda, market: market_kp.pubkey(), token_program: anchor_spl::token::spl_token::id(),
+        })
+        .args(nfl_blockchain::instruction::PlaceLimitSell { price: 80, quantity: 10, is_yes: true })
+        .signer(&seller_kp)
+        .send().unwrap();
+
+    // 2. Place CHEAP Order SECOND (Price: 50, Qty: 10)
+    // This is the "Best Price" that should be matched first.
+    program.request()
+        .accounts(nfl_blockchain::accounts::PlaceLimitSell {
+            seller: seller_kp.pubkey(), seller_token_ata: seller_yes, seller_receive_collateral_ata: seller_collateral,
+            order_book: order_book_pda, yes_vault: yes_vault_pda, no_vault: no_vault_pda, market: market_kp.pubkey(), token_program: anchor_spl::token::spl_token::id(),
+        })
+        .args(nfl_blockchain::instruction::PlaceLimitSell { price: 50, quantity: 10, is_yes: true })
+        .signer(&seller_kp)
+        .send().unwrap();
+
+    // --- BUYER EXECUTION ---
+    let buyer_pubkey = payer.pubkey();
+    let buyer_collateral = create_ata(&program, payer, buyer_pubkey, base_mint);
+    let buyer_yes = create_ata(&program, payer, buyer_pubkey, yes_mint_kp.pubkey());
+    mint_tokens(&program, payer, base_mint, buyer_collateral, 1000);
+
+    // Capture Seller Balance BEFORE trade
+    let seller_bal_before = program.account::<TokenAccount>(seller_collateral).unwrap().amount;
+
+    // Buyer buys 10 tokens. 
+    // EXPECTATION: Should match the CHEAP order (50), not the EXPENSIVE one (80).
+    // Total cost should be 10 * 50 = 500.
+    program.request()
+        .accounts(nfl_blockchain::accounts::MarketBuyAccounts {
+            buyer: buyer_pubkey, 
+            buyer_collateral_ata: buyer_collateral,
+            buyer_receive_token_ata: buyer_yes,
+            market: market_kp.pubkey(),
+            order_book: order_book_pda,
+            yes_vault: yes_vault_pda,
+            no_vault: no_vault_pda,
+            token_program: anchor_spl::token::spl_token::id(),
+        })
+        .args(nfl_blockchain::instruction::MarketBuy {
+            params: nfl_blockchain::MarketBuyParams { quantity: 10, want_yes: true }
+        })
+        // We pass the same seller account twice because we might theoretically match multiple orders from same seller
+        // but for this test, passing it once or in a list is fine as long as the program finds it.
+        // The program iterates `remaining_accounts` based on orders matched. 
+        // Since we only match 1 order, we only need 1 account here.
+        .accounts(vec![ AccountMeta::new(seller_collateral, false) ]) 
+        .signer(payer) 
+        .send() 
+        .unwrap();
+
+    // --- VERIFICATION ---
+    let seller_bal_after = program.account::<TokenAccount>(seller_collateral).unwrap().amount;
+    let profit = seller_bal_after - seller_bal_before;
+
+    println!("Seller Profit: {}", profit);
+
+    // If it matched the FIRST order (FIFO), profit would be 800 (10 * 80).
+    // If it matched the BEST PRICE order, profit would be 500 (10 * 50).
+    assert_eq!(profit, 500, "Buyer failed to get the best price! Matched expensive order.");
+
+    let ob_account: nfl_blockchain::OrderBook = program.account(order_book_pda).unwrap();
+    assert_eq!(ob_account.orders.len(), 1, "Should have 1 order remaining");
+    assert_eq!(ob_account.orders[0].price, 80, "Remaining order should be the expensive one");
+}
