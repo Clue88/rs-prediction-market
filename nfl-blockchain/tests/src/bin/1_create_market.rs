@@ -31,8 +31,7 @@ fn get_ob_vault_pda(order_book: Pubkey, is_yes: bool) -> Pubkey {
 }
 
 fn main() {
-    println!("==========================================");
-    println!("Demo 1: Market Authority");
+    println!("Market Authority");
     println!("Creating a prediction market...");
     println!("==========================================\n");
 
@@ -45,7 +44,7 @@ fn main() {
     }
 
     // Step 1: Setup client and create base collateral mint
-    println!("Step 1: Setting up client and creating base mint...");
+    println!("Step 1: Setting up market authority as client and creating base mint...");
     let (program, payer) = setup_client();
     let base_mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();    println!("   [OK] Base mint created: {}", base_mint);
 
@@ -53,11 +52,7 @@ fn main() {
     println!("\nStep 2: Creating prediction market...");
     let (market_kp, yes_mint_kp, no_mint_kp, vault_kp, market_authority) =
         create_market(&program, payer, base_mint);
-    println!("   [OK] Market created: {}", market_kp.pubkey());
-    println!("   [OK] YES mint: {}", yes_mint_kp.pubkey());
-    println!("   [OK] NO mint: {}", no_mint_kp.pubkey());
-    println!("   [OK] Vault: {}", vault_kp.pubkey());
-    println!("   [OK] Market authority: {}", market_authority);
+
 
     // Step 3: Initialize order book
     println!("\nStep 3: Initializing order book...");
@@ -83,12 +78,10 @@ fn main() {
         .send()
         .unwrap();
     println!("   [OK] Order book initialized: {}", order_book_pda);
-    println!("   [OK] YES vault: {}", yes_vault_pda);
-    println!("   [OK] NO vault: {}", no_vault_pda);
 
     // Print market information for use in subsequent demos
 
-    println!("\nTo use in next demos, export these as environment variables:");
+    println!("\nTo market info in next demos, export these as environment variables:");
     println!("export MARKET={}", market_kp.pubkey());
     println!("export BASE_MINT={}", base_mint);
     println!("export YES_MINT={}", yes_mint_kp.pubkey());
@@ -98,6 +91,5 @@ fn main() {
     println!("export ORDER_BOOK={}", order_book_pda);
     println!("export YES_VAULT={}", yes_vault_pda);
     println!("export NO_VAULT={}", no_vault_pda);
-    println!("\nDemo 1 completed successfully!");
 }
 

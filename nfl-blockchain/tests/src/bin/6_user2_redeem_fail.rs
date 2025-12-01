@@ -23,10 +23,7 @@ use anchor_spl::token::TokenAccount;
 use tests::test_utils::*;
 
 fn main() {
-    println!("==========================================");
-    println!("Demo 6: User 2");
-    println!("Attempting to redeem NO tokens (should fail)...");
-    println!("==========================================\n");
+    println!("Demo 6: User 2 attempting to redeem NO tokens (should fail)... \n");
 
     // Check for required environment variables
     let market = get_env_pubkey("MARKET");
@@ -60,7 +57,6 @@ fn main() {
     }
 
     println!("   [OK] Market is resolved to YES");
-    println!("   [INFO] User 2 holds NO tokens, which are losing tokens in this scenario");
 
     // Step 3: Get User 2's token accounts
     println!("\nStep 3: Getting User 2's token accounts...");
@@ -144,13 +140,6 @@ fn main() {
                 eprintln!("   [WARNING] Collateral changed unexpectedly!");
             }
             
-            println!("\n==========================================");
-            println!("Redemption Summary:");
-            println!("==========================================");
-            println!("Status: FAILED (as expected)");
-            println!("Reason: User 2 holds NO tokens, but market resolved to YES");
-            println!("Result: NO tokens cannot be redeemed when market outcome is YES");
-            println!("\nDemo 6 completed successfully!");
             println!("User 2 correctly cannot redeem losing NO tokens!");
         }
     }

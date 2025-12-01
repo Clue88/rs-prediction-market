@@ -29,10 +29,8 @@ use std::str::FromStr;
 use tests::test_utils::*;
 
 fn main() {
-    println!("==========================================");
-    println!("Demo 3: User 2");
-    println!("Buying NO tokens from User 1...");
-    println!("==========================================\n");
+    println!("User 2 Buying NO tokens from User 1...\n");
+
 
     // Check for required environment variables
     let market = get_env_pubkey("MARKET");
@@ -47,12 +45,10 @@ fn main() {
     // Setup client as User 2
     println!("Step 1: Setting up client as User 2...");
     let (program, payer) = setup_client();
-    println!("   [OK] User 2 address: {}", payer.pubkey());
 
     // Step 2: Check order book for available NO token sell orders
     println!("\nStep 2: Checking order book for NO token sell orders...");
     let ob_account: nfl_blockchain::OrderBook = program.account(order_book).unwrap();
-    println!("   [OK] Order book has {} order(s)", ob_account.orders.len());
     
     // Find NO token sell orders (is_yes = false)
     let no_orders: Vec<_> = ob_account.orders.iter()
@@ -75,36 +71,6 @@ fn main() {
     println!("\nStep 3: Creating and funding collateral account...");
     let user_collateral = create_ata(&program, payer, payer.pubkey(), base_mint);
     
-    // Check if this is wSOL (So11111111111111111111111111111111111111112)
-    let wsol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
-    let is_wsol = base_mint == wsol_mint;
-    
-    // User 2 wagers 2 SOL = 2_000_000_000 lamports
-    let wager_amount = 2_000_000_000; // 2 SOL
-    
-    if is_wsol {
-        println!("   [OK] Using wSOL as collateral (no minting needed)");
-        println!("   [OK] User 2 collateral account: {}", user_collateral);
-        println!("   [INFO] User 2 should already have wSOL from wrapping");
-        println!("   [INFO] User 2 needs {} lamports (2 SOL) to buy NO tokens", wager_amount);
-    } else {
-        // For non-wSOL mints, need to mint tokens
-        // Note: This requires the mint authority, which User 2 may not have
-        // In a real scenario, Market Authority would mint tokens for User 2, or User 2 would receive them via transfer
-        println!("   [WARNING] Attempting to mint tokens - this may fail if User 2 is not the mint authority");
-        // Calculate cost with fractional price support: cost = (price * quantity) / PRICE_SCALE
-        // For price = 1.0 (1_000_000_000) and quantity = 2_000_000_000:
-        // cost = (1_000_000_000 * 2_000_000_000) / 1_000_000_000 = 2_000_000_000
-        let price_scale = 1_000_000_000u64;
-        let estimated_cost = ((no_orders[0].price as u128)
-            .checked_mul(no_orders[0].quantity as u128)
-            .unwrap()
-            .checked_div(price_scale as u128)
-            .unwrap()) as u64;
-        mint_tokens(&program, payer, base_mint, user_collateral, estimated_cost);
-        println!("   [OK] User 2 collateral account: {}", user_collateral);
-        println!("   [OK] Minted {} collateral tokens (2 SOL)", estimated_cost);
-    }
 
     // Step 4: Create NO token ATA to receive purchased NO tokens
     println!("\nStep 4: Creating NO token account...");
@@ -148,19 +114,11 @@ fn main() {
     let no_acc: TokenAccount = program.account(user_no).unwrap();
     let collateral_acc: TokenAccount = program.account(user_collateral).unwrap();
 
-    println!("\n==========================================");
+    println!("\n-------------");
     println!("User 2 Final Position:");
-    println!("==========================================");
     println!("NO tokens: {} (purchased, 2 SOL worth)", no_acc.amount);
     println!("Collateral: {} (spent 2 SOL on purchase)", collateral_acc.amount);
-    println!("\nDemo 3 completed successfully!");
-    println!("User 2 has successfully purchased NO tokens from User 1!");
-    println!("\nExpected outcome if YES wins:");
-    println!("  - User 2 holds NO tokens: {} (worthless if YES wins)", no_acc.amount);
-    println!("  - User 2 total: 0 SOL (-2 SOL loss)");
-    println!("\nExpected outcome if NO wins:");
-    println!("  - User 2 redeems NO tokens: {} (2 SOL)", no_acc.amount);
-    println!("  - User 2 total: 2 SOL (break even, paid 2 SOL)");
+    
 }
 
 fn get_env_pubkey(name: &str) -> Pubkey {

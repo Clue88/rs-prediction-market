@@ -17,10 +17,7 @@ use anchor_client::solana_sdk::signature::Signer;
 use tests::test_utils::*;
 
 fn main() {
-    println!("==========================================");
-    println!("Demo 4: Market Authority");
-    println!("Resolving market to YES...");
-    println!("==========================================\n");
+    println!("Market Authority resolving market to YES...\n");
 
     // Check for required environment variables
     let market = get_env_pubkey("MARKET");
@@ -67,16 +64,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("\n==========================================");
-    println!("Market Resolution Summary:");
-    println!("==========================================");
-    println!("Market: {}", market);
-    println!("Status: {:?}", resolved_market.status);
-    println!("Outcome: {:?}", resolved_market.outcome);
-    println!("\nWinners (holders of YES tokens) can now redeem their tokens!");
-    println!("Losers (holders of NO tokens) cannot redeem.");
-    println!("\nDemo 4 completed successfully!");
-    println!("The market has been resolved to YES!");
+
 }
 
 fn get_env_pubkey(name: &str) -> Pubkey {

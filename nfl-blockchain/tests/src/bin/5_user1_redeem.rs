@@ -23,10 +23,7 @@ use anchor_spl::token::TokenAccount;
 use tests::test_utils::*;
 
 fn main() {
-    println!("==========================================");
-    println!("Demo 5: User 1");
-    println!("Redeeming YES tokens (should succeed)...");
-    println!("==========================================\n");
+    println!("User 1 Redeeming YES tokens (should succeed)... \n");
 
     // Check for required environment variables
     let market = get_env_pubkey("MARKET");
@@ -122,15 +119,9 @@ fn main() {
                      collateral_after.amount, 
                      collateral_after.amount.saturating_sub(collateral_before.amount));
             
-            println!("\n==========================================");
-            println!("Redemption Summary:");
-            println!("==========================================");
-            println!("Status: SUCCESS");
             println!("User 1 successfully redeemed {} YES tokens", yes_before.amount);
-            println!("Received collateral: {}", 
+            println!("Total collateral: {}", 
                      collateral_after.amount.saturating_sub(collateral_before.amount));
-            println!("\nDemo 5 completed successfully!");
-            println!("User 1 has successfully redeemed their winning YES tokens!");
         }
         Err(e) => {
             eprintln!("   [ERROR] Redemption failed: {:?}", e);
