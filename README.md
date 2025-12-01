@@ -42,6 +42,27 @@ unlocking the collateral vault for the winning side only:
     * If NO wins: The NO token becomes redeemable for 1.00 USDC. 
     Bob profits 0.40 (1.00 payout - 0.60 cost). Alice's YES token becomes worthless.
 
+Each order book is represented by an `OrderBook` account and each order within the order book is represented by an `Order` struct:
+```rust
+#[account]
+pub struct OrderBook {
+    pub market: Pubkey,        // Market address
+    pub next_order_id: u64,    // Unique ID counter
+    pub capacity: u64,         // Max active orders
+    pub orders: Vec<Order>,    // List of open orders
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Order {
+    pub id: u64,                               // Order ID
+    pub owner: Pubkey,                         // Seller wallet
+    pub seller_receive_collateral_ata: Pubkey, // Seller payment account
+    pub price: u64,                            // Ask price per share
+    pub quantity: u64,                         // Amount to sell
+    pub is_yes: bool,                          // YES token if true, NO o/w
+}
+```
+
 ## Installation
 Install Solana:
 ```bash
