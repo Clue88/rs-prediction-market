@@ -1,5 +1,5 @@
-# NFL Prediction Market
-This project implements a binary prediction market, similar to Kalshi or Polymarket.
+# Rust Prediction Market
+This project implements a binary prediction market, similar to Kalshi or Polymarket, in Rust.
 
 ## Contract Structure and Implementation
 For each market, the program creates mints for YES and NO tokens and a vault for holding collateral.
