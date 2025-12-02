@@ -21,3 +21,6 @@ mod test_order_book;
 
 // Utils
 pub mod test_utils;
+
+// Demo
+pub mod demo;

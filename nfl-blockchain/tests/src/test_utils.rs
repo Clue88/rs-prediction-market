@@ -21,7 +21,7 @@ pub fn setup_client() -> (Program<&'static Keypair>, &'static Keypair) {
     let boxed = Box::new(kp);
     let payer: &'static Keypair = Box::leak(boxed);
 
-    let program_id = Pubkey::from_str("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc").unwrap();
+    let program_id = Pubkey::from_str("2qdp2bKXQHhRiD1kPS22Zyx3dxuevXkiRgvWKghHSGzx").unwrap();
 
     let client = Client::new_with_options(Cluster::Localnet, payer, CommitmentConfig::processed());
     let program = client.program(program_id).unwrap();
@@ -67,6 +67,7 @@ pub fn create_mint(program: &Program<&Keypair>, mint_authority: &Keypair) -> Key
 }
 
 /// Create an ATA for (owner, mint), paid by `payer`.
+/// Returns the ATA address, creating it if it doesn't exist.
 pub fn create_ata(
     program: &Program<&Keypair>,
     payer: &Keypair,
@@ -75,6 +76,11 @@ pub fn create_ata(
 ) -> Pubkey {
     let ata = spl_associated_token_account::get_associated_token_address(&owner, &mint);
 
+    // Check if the account already exists by trying to get it
+    if program.rpc().get_account(&ata).is_ok() {
+        return ata;
+    }
+
     let ix = spl_associated_token_account::instruction::create_associated_token_account(
         &payer.pubkey(),
         &owner,
@@ -82,7 +88,16 @@ pub fn create_ata(
         &spl_token::id(),
     );
 
-    program.request().instruction(ix).send().unwrap();
+    // Try to create, but ignore error if account already exists
+    let result = program.request().instruction(ix).send();
+    if result.is_err() {
+        // If creation fails, check if account exists now (might have been created concurrently)
+        if program.rpc().get_account(&ata).is_ok() {
+            return ata;
+        }
+        // Otherwise, propagate the error
+        result.unwrap();
+    }
 
     ata
 }

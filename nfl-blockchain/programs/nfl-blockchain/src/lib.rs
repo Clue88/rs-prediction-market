@@ -1,7 +1,36 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("433xjq33NNMksxDcrSTqp42FcGc2MRYhHdoDPtiADHwc");
+declare_id!("2qdp2bKXQHhRiD1kPS22Zyx3dxuevXkiRgvWKghHSGzx");
+
+// Const function to parse u64 from string at compile time
+const fn parse_u64_from_str(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let mut result = 0u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= b'0' && b <= b'9' {
+            result = result * 10 + (b - b'0') as u64;
+        } else {
+            // Invalid character, return default of 1
+            return 1;
+        }
+        i += 1;
+    }
+    result
+}
+
+// Price scale for fractional prices: defaults to 1 if PRICE_SCALE env var is not set
+// Can be set at compile time via environment variable: PRICE_SCALE=1000000000 cargo build
+// Example: price = 1_500_000_000 represents 1.5, price = 500_000_000 represents 0.5
+pub const PRICE_SCALE: u64 = {
+    const ENV_STR: Option<&str> = option_env!("PRICE_SCALE");
+    match ENV_STR {
+        Some(s) => parse_u64_from_str(s),
+        None => 1,
+    }
+};
 
 // --- Instruction Data Structs ---
 
@@ -13,6 +42,7 @@ pub struct MarketBuyParams {
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct BuyExactParams {
+    /// Maximum price per unit as scaled integer: max_price = actual_price * PRICE_SCALE
     pub max_price: u64,
     pub quantity: u64,
     pub want_yes: bool,
@@ -261,6 +291,10 @@ pub mod nfl_blockchain {
     /// Place a Limit Sell Order.
     /// This escrows the Seller's outcome tokens (YES or NO) into the vault 
     /// and records their desire to sell at a specific price.
+    /// 
+    /// Price is stored as a scaled integer: price = actual_price * PRICE_SCALE
+    /// Example: price = 1_500_000_000 represents 1.5, price = 500_000_000 represents 0.5
+    /// When calculating payment, the cost is rounded down: cost = (price * quantity) / PRICE_SCALE
     pub fn place_limit_sell(ctx: Context<PlaceLimitSell>, price: u64, quantity: u64, is_yes: bool) -> Result<()> {
         require!(quantity > 0, NflError::InvalidAmount);
         
@@ -369,7 +403,13 @@ pub mod nfl_blockchain {
                 return err!(NflError::SellerAccountMismatch);
             }
 
-            let cost = (order.price as u64).checked_mul(fill_amount).ok_or(NflError::MathOverflow)?;
+            // Calculate cost with fractional price support: cost = (price * fill_amount) / PRICE_SCALE
+            // Round down by using integer division
+            let cost = (order.price as u128)
+                .checked_mul(fill_amount as u128)
+                .ok_or(NflError::MathOverflow)?
+                .checked_div(PRICE_SCALE as u128)
+                .ok_or(NflError::MathOverflow)? as u64;
 
             // 1. Payment Transfer: Buyer pays Seller (Collateral/USDC) directly
             let cpi_pay = Transfer {
@@ -461,7 +501,13 @@ pub mod nfl_blockchain {
                 return err!(NflError::SellerAccountMismatch);
             }
 
-            let cost = (order.price as u64).checked_mul(fill_amount).unwrap();
+            // Calculate cost with fractional price support: cost = (price * fill_amount) / PRICE_SCALE
+            // Round down by using integer division
+            let cost = (order.price as u128)
+                .checked_mul(fill_amount as u128)
+                .unwrap()
+                .checked_div(PRICE_SCALE as u128)
+                .unwrap() as u64;
 
             // Buyer pays Seller
             let cpi_pay = Transfer {
@@ -745,6 +791,8 @@ pub struct Order {
     pub id: u64,
     pub owner: Pubkey,
     pub seller_receive_collateral_ata: Pubkey,
+    /// Price per unit as scaled integer: price = actual_price * PRICE_SCALE
+    /// Example: 1_500_000_000 = 1.5, 500_000_000 = 0.5
     pub price: u64,
     pub quantity: u64,
     pub is_yes: bool,

@@ -89,3 +89,20 @@ Tests may fail if executed in parallel. If tests failing at first, try the follo
 RUST_TEST_THREADS=1 anchor test
 ```
 
+
+
+## Demo 
+```bash
+# 1. Start local validator
+solana-test-validator --reset
+
+# 2. Build the program 
+anchor build
+
+# 3. Deploy the program 
+anchor deploy
+# IMPORTANT - after this, replace ID in src/lib.rs line 4, Anchor.toml line 9, and test_utils.rs line 24.
+
+# 4. Run tests/demo (must use the same program ID)
+cargo run --bin demo
+```
