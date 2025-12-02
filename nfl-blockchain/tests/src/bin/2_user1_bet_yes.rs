@@ -93,7 +93,7 @@ fn main() {
         })
         .send()
         .unwrap();
-    println!("   [OK] Placed sell order: {} NO tokens at price {}", sell_quantity, sell_price/1000_000_000);
+    println!("   [OK] Placed sell order: {} NO tokens at price {}", sell_quantity, sell_price);
 
     // Verify order was placed
     let ob_account: nfl_blockchain::OrderBook = program.account(order_book).unwrap();

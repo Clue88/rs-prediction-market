@@ -1,5 +1,5 @@
 
-anchor build 
+PRICE_SCALE=1000000000 anchor build
 anchor deploy
 
 solana airdrop 20 $(solana-keygen pubkey ~/.config/solana/marketauth.json) --url localhost     

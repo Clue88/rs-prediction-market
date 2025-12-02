@@ -3,10 +3,34 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer}; // Removed u
 
 declare_id!("2qdp2bKXQHhRiD1kPS22Zyx3dxuevXkiRgvWKghHSGzx");
 
-// Price scale for fractional prices: 1_000_000_000 = 1.0
-// This allows prices to have 9 decimal places of precision
+// Const function to parse u64 from string at compile time
+const fn parse_u64_from_str(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let mut result = 0u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= b'0' && b <= b'9' {
+            result = result * 10 + (b - b'0') as u64;
+        } else {
+            // Invalid character, return default of 1
+            return 1;
+        }
+        i += 1;
+    }
+    result
+}
+
+// Price scale for fractional prices: defaults to 1 if PRICE_SCALE env var is not set
+// Can be set at compile time via environment variable: PRICE_SCALE=1000000000 cargo build
 // Example: price = 1_500_000_000 represents 1.5, price = 500_000_000 represents 0.5
-pub const PRICE_SCALE: u64 = 1_000_000_000;
+pub const PRICE_SCALE: u64 = {
+    const ENV_STR: Option<&str> = option_env!("PRICE_SCALE");
+    match ENV_STR {
+        Some(s) => parse_u64_from_str(s),
+        None => 1,
+    }
+};
 
 // --- Instruction Data Structs ---
 
