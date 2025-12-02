@@ -92,17 +92,33 @@ RUST_TEST_THREADS=1 anchor test
 
 
 ## Demo 
+To make the demo work, you need to initialize 3 wallets - the market authority wallet (called marketauth), a buyer(user2), and a seller(user1). 
+You then initialize the chain, deploy our anchor program, and can run the scripts in `tests/src/bin` to call our library. 
+
+
 ```bash
+
+#Make 3 new custom wallets. 
+solana-keygen new --outfile /path/to/your/custom-wallet.json
+
 # 1. Start local validator
 solana-test-validator --reset
 
-# 2. Build the program 
-anchor build
+# In a different terminal, prep the demo using this shellscript
+cd nfl-blockchain
+./tests/prep_demo
 
-# 3. Deploy the program 
-anchor deploy
 # IMPORTANT - after this, replace ID in src/lib.rs line 4, Anchor.toml line 9, and test_utils.rs line 24.
 
-# 4. Run tests/demo (must use the same program ID)
-cargo run --bin demo
+# 4. Run demo scripts 
+cargo run --bin [program_name]
+
+# You can change who is "logged in" by running:
+export ANCHOR_WALLET=~/path/to/anchor/wallet
+
+#You can check balances of wallets using: 
+./tests/check_balances
+
 ```
+Right now, the demo is configured for three specific users, but this can be changed easily by modifying the shellscripts. 
+
